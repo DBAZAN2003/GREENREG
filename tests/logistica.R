@@ -1,4 +1,4 @@
-library(CHAPIREG)
+library(GREENREG)
 data("datos_roya_cafe")
 head(datos_roya_cafe)
 

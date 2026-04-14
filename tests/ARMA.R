@@ -1,4 +1,4 @@
-library(CHAPIREG)
+library(GREENREG)
 data("datos_anomalia_temperatura")
 ts_data <- datos_anomalia_temperatura$anomalia_c
 

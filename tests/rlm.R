@@ -1,4 +1,4 @@
-library(CHAPIREG)
+library(GREENREG)
 data("datos_rendimiento_maiz")
 modelo_rlm <- rlm(rendimiento_maiz_ton_ha ~., data = datos_rendimiento_maiz)
 modelo_rlm

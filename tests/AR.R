@@ -1,4 +1,4 @@
-library(CHAPIREG)
+library(GREENREG)
 data("datos_anomalia_temperatura")
 modelo_ARchapi <- modelo_ar(datos_anomalia_temperatura$anomalia_c, p = 2)
 modelo_ARchapi

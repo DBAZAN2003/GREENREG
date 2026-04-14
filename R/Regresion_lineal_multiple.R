@@ -55,7 +55,7 @@
 #' # data(datos_rendimiento_maiz)
 #' # modelo_rlm <- rlm(rendimiento_maiz_ton_ha ~., data = datos_rendimiento_maiz)
 #' # modelo_rlm       # Ver reporte
-#' # plot(modelo_rlm) # Ver gráficas incluyendo VIF
+#' # plot(modelo_rlm) # Ver gráficas
 #'
 #' @importFrom stats lm anova shapiro.test residuals fitted coef confint sd median cor pf model.matrix cooks.distance hatvalues rstandard
 #' @importFrom lmtest bptest dwtest raintest

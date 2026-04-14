@@ -1,4 +1,4 @@
-library(CHAPIREG)
+library(GREENREG)
 data("datos_tala_ilegal_poisson")
 modelo_poisson_chapi <- reg_poisson(numero_talas ~ densidad_poblacion + superficie_forestal_ha + dias_vigilancia, data = datos_tala_ilegal_poisson)
 modelo_poisson_chapi

@@ -1,4 +1,4 @@
-library(CHAPIREG)
+library(GREENREG)
 data("datos_nivel_presa")
 ts_data <- datos_nivel_presa$nivel_m
 modelo_ARIMAchapi <- modelo_arima(ts_data, p = 1, d = 1, q = 1)
