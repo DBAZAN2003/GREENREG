@@ -69,6 +69,6 @@ Al ejecutar \code{plot(modelo)}, se despliega una secuencia educativa de 10 visu
 # data(datos_rendimiento_maiz)
 # modelo_rlm <- rlm(rendimiento_maiz_ton_ha ~., data = datos_rendimiento_maiz)
 # modelo_rlm       # Ver reporte
-# plot(modelo_rlm) # Ver gráficas incluyendo VIF
+# plot(modelo_rlm) # Ver gráficas
 
 }

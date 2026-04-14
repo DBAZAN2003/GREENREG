@@ -62,6 +62,6 @@ Al ejecutar \code{plot(modelo)}, se despliega una secuencia educativa:
 # data(maiz)
 # modelo <- rls(rendimiento_maiz_ton_ha ~ precipitacion_mm, data = datos_rendimiento_maiz)
 # modelo       # Imprime el reporte
-# plot(modelo) # Genera las 7 gráficas
+# plot(modelo) # Genera las 9 gráficas
 
 }
