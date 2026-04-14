@@ -1,4 +1,4 @@
-library(CHAPIREG)
+library(GREENREG)
 data("datos_rendimiento_maiz")
 modelo <- rls(rendimiento_maiz_ton_ha ~ precipitacion_mm, data = datos_rendimiento_maiz)
 modelo
