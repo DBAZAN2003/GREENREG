@@ -1,0 +1,527 @@
+# . -----------------------------------------------------------------------
+#                              UNIDAD 2                                   #
+#                     REGRESION LINEAL MULTIPLE                           #
+#                   Dr. Julio Cesar Buendia-Espinoza                      #
+#                        Depto. de Suelos, UACh                           #
+# . -----------------------------------------------------------------------
+
+#install.packages("olsrr")
+library(olsrr)
+library(car)
+
+# Pregunta de investigacion:
+# Que patrones y variables ambientales controlan la diversidad 
+# de los ostracodos marinos?. 
+
+# Por lo tanto, se buscan las variables mas importantes, 
+# asumiendo una relacion lineal de variables explicativas
+# con la variable respuesta (riqueza de especies despues 
+# la rarefaccion)
+
+# . -----------------------------------------------------------------------
+#                               Cargar los datos
+# . -----------------------------------------------------------------------
+
+# (Get Working Directory)-Localizaci?n del Directorio de Trabajo
+getwd() 
+
+# Localizacion del Folder de Trabajo
+setwd("C:/Users/dbaza/Documents/MODELOS MATEMATICOS")
+
+# Lectura de datos
+data_oc <- read.csv("ostras.csv",header=T) 
+data_oc
+head(data_oc,3)
+
+#View(data_oc)
+# Verificación de la estructura de la base de datos
+sapply(data_oc,class)
+
+# Las variables son:
+
+# E100: Riqueza de especies enrarecida a 100 individuos,
+# SR: Riqueza de especies,
+# MDS 1: Primer eje de escalamiento multidimensional,
+# MDS 2: Segundo eje de escalamiento multidimensional,
+# DP: Profundidad del agua (m),
+# RC: Codigo de region,
+# BT: Temperatura del agua del fondo,
+# SA: Salinidad,
+# SP: Estacionalidad de la productividad,
+# IC: Numero de dias sin hielo por ano,
+# P: Productividad superficial,
+# DCA 1: Primer eje de analisis de correspondencia desarmado,
+# DCA 2: Segundo eje de analisis de correspondencia desarmado,
+# LAT: Latitud,
+# LON: Longitud.
+
+# . -----------------------------------------------------------------------
+#                  Eliminación de información no requerida
+# . -----------------------------------------------------------------------
+
+# Primero eliminar la informacion no requerida
+data_oc2<-data_oc[, !names(data_oc) %in% c("MDS1", "MDS2", "DCA1", "DCA2")]
+tail(data_oc2,3)
+
+# . -----------------------------------------------------------------------
+#       Comprobación de la dn de variables y su transformacion
+# . -----------------------------------------------------------------------
+
+# Verificar si alguna de las variables debe transformarse
+library(GGally)
+ggpairs(data_oc2) #Esta fn se puede usar siempre y cuando no haya 
+                  #variables categóricas
+
+par(mfrow = c(3, 3),cex=.5)
+hist(data_oc2$DP)
+hist(data_oc2$RC)
+hist(data_oc2$BT)
+hist(data_oc2$SA)
+hist(data_oc2$SP)
+hist(data_oc2$IC)
+hist(data_oc2$P)
+hist(data_oc2$LAT)
+hist(data_oc2$LON)
+dev.off() #Quita el formato de graficar en columnas
+
+# Conclusion: Particularmente DP y BT parecen sesgados. DP tiene un 
+# rango relativamente amplio
+
+# Nota: Adicionalmente se realiza una prueba de normalidad 
+
+shapiro.test(data_oc2$DP)
+qqnorm(data_oc2$DP)
+qqline(data_oc2$DP)
+cv_DP<-(sd(data_oc2$DP)/mean(data_oc2$DP))*100
+cv_DP
+# CV > 50% no existe normalidad
+
+# Transformación de la variable DP
+DPlog<-as.numeric(log10(data_oc$DP))
+DPlog
+hist(DPlog)
+shapiro.test(DPlog)
+qqnorm(DPlog)
+qqline(DPlog)
+cv_DPlog<-(sd(DPlog)/mean(DPlog))*100
+cv_DPlog
+
+
+# Conclusion: DPlog es menos sesgada; por lo tanto, agregarla al 
+# conjunto de datos
+
+data_oc2$DPlog <- log10(data_oc$DP)
+tail(data_oc2,3)
+
+# . -----------------------------------------------------------------------
+#            Comprobacion de colinealidad/Multicolinealidad
+# . -----------------------------------------------------------------------
+
+# Antes de verificar la colinealidad entre las variables exploratorias, 
+# elimine la variable respuesta (E100 y SR ) y la profundidad no 
+# transformada (DP). Lo anterior se hace con el propósito de que unicamente,
+# queden variables explicativas en las base de datos, ya que a las variables
+# explicativas son a las que se les mide la multicolinealiad.
+
+# NOTA: E100 y SR son la variabe respuesta, pero la primera está
+# enrarecida a 100 individuos  y la segunda es el  numero de especies
+# tomado en campo
+
+data_check <- data_oc2[, !names(data_oc2) %in% c("E100", "DP", "SR")]
+tail(data_check,3)
+
+# Correlación de pearson
+library("corrplot") # corrplot::corrplot()
+library("psych") # psych::corr.test
+library("car") # car::scatterplotMatrix
+r<-cor(data_check, use = "complete.obs")
+r
+corrplot(r,method="ellipse",type="lower",order="hclust",
+         number.cex = .9,addCoef.col = "black")
+# COnclusión: Alta correlacion entre SP e IC, IC y P, SP y P, IC y BT
+
+
+# . -----------------------------------------------------------------------
+#               Seleccion de variables 
+# . -----------------------------------------------------------------------
+
+# Nota: Para la selección de variables, debe tomar en consideración la
+# correlación de pearson.
+
+# 1. Selección automática de variables considerando un valor umbral de 
+#    correlación
+
+# https://github.com/luismurao/ntbox
+#if (!require('devtools')) install.packages('devtools')
+#devtools::install_github('luismurao/ntbox')
+# If you want to build vignette, install pandoc before and then
+#devtools::install_github('luismurao/ntbox',build_vignettes=TRUE)
+#install.packages(ntbox,dependencies = T)
+#run_ntbox()
+
+library(rlang)
+var_cor <- r
+var_sel <- ntbox::correlation_finder(cor_mat = var_cor,
+                                       threshold = 0.6,
+                                       verbose = FALSE)
+var_sel$descriptors #variables seleccionadas
+
+# Conclusión: Realizar la correlación le permite saber que variables 
+# podria eliminar del modelo a traves del VIF
+
+# 2. Slección de variables vía el VIF (Valor de Inflación de Varianza)
+
+#  Si el VIF de una variable es superior a 5 se considera que esa 
+# variable aumenta la varianza del modelo.
+
+# Modelo nulo (No contempla variables explicativas, el valor 1 indica
+# que el modelo solo se estimara con el intercepto)
+mod_nulo <- lm(data_oc2$E100 ~ 1, data = data_check)
+summary.lm(mod_nulo)
+summary.lm(mod_nulo)$r.squared
+AIC(mod_nulo)
+anova(mod_nulo)
+
+# Modelo con covariables (Contempla todas variables explicativas, el 
+#  . indica que el modelo estimara el intercepto y los demás betas)
+mod_vif <- lm(data_oc2$E100 ~ ., data = data_check)
+summary.lm(mod_vif)
+summary.lm(mod_vif)$r.squared
+AIC(mod_vif)
+anova(mod_vif)
+library(car)
+vif(mod_vif)
+
+# Conclusión: Las variables: SP e IC aumentan la varianza del modelo.
+# IC se correlaciona con muchas variables, incluida la Productividad (SP).
+# En este caso se asumirá que la productividad es mas importante que IC, 
+# por lo tanto elimine IC
+
+data_env <- data_check[, names(data_check) != "IC"]
+tail(data_env,3)
+
+# Se ajusta el modelo nuevamente, pero se incluye la interacción entre
+# temperatura y DPlog, en aras de demostracion, independientemente de 
+# si dicha interacción tiene sentido
+
+mod_vif_1 <- lm(data_oc2$E100 ~ . + BT:DPlog, data = data_env,
+            na.action = "na.fail")
+summary.lm(mod_vif_1)
+summary.lm(mod_vif_1)$r.squared
+AIC(mod_vif_1)
+anova(mod_vif_1)
+vif(mod_vif_1)
+# Conclusion: BT, BT:DPLog y SA tiene un VIF > 5; por lo tanto,
+# se elimina BT, que tiene el mayor valor del VIF# 
+
+data_env1 <- data_env[, names(data_env ) != "BT"]
+tail(data_env1,3)
+
+mod_vif_2 <- lm(data_oc2$E100 ~ ., data = data_env1,
+            na.action = "na.fail")
+summary.lm(mod_vif_2)
+summary.lm(mod_vif_2)$r.squared
+AIC(mod_vif_2)
+anova(mod_vif_2)
+vif(mod_vif_2)
+
+# Conclusion: SA y Sp no son estadisticamente significativas al 0.05;
+# Por lo tanto, se eliminara SP que es la que se correlaciona con mayor
+# grado.
+data_env2 <- data_env1[, names(data_env1 ) != "SP"]
+tail(data_env2,3)
+
+mod_vif_3 <- lm(data_oc2$E100 ~ ., data = data_env2,
+             na.action = "na.fail")
+summary.lm(mod_vif_3)
+summary.lm(mod_vif_3)$r.squared
+AIC(mod_vif_3)
+anova(mod_vif_3)
+vif(mod_vif_3)
+
+# Se elimina a RC dado que no es estadisticamente significativa
+data_env3 <- data_env2[, names(data_env2 ) != "RC"]
+tail(data_env3,3)
+
+mod_vif_4 <- lm(data_oc2$E100 ~ ., data = data_env3,
+             na.action = "na.fail")
+summary.lm(mod_vif_4)
+summary.lm(mod_vif_4)$r.squared
+AIC(mod_vif_4)
+anova(mod_vif_4)
+vif(mod_vif_4)
+
+# Se elimina a LAT dado que en conjunto no es estadisticamente 
+# significativa
+data_env4 <- data_env3[, names(data_env3 ) != "LAT"]
+tail(data_env4,3)
+
+mod_vif_5 <- lm(data_oc2$E100 ~ ., data = data_env4,
+             na.action = "na.fail")
+summary.lm(mod_vif_5)
+summary.lm(mod_vif_5)$r.squared
+AIC(mod_vif_5)
+anova(mod_vif_5)
+vif(mod_vif_5)
+
+# NOTA: Es importante recorda que la eliminacion de variables
+# está sujeta al conocimiento del investigador, pero también al
+# bondad de ajuste del modelo, es decir al r2; razon por la cual 
+# se elige el modelo mod_vif_4, que tiene todos sus estimadores 
+# estadísticamente significativos y que su r^2 es el más elevado.
+
+mod_final<-mod_vif_4 <- lm(data_oc2$E100 ~ ., data = data_env3,
+             na.action = "na.fail")
+mod_final
+summary.lm(mod_final)$r.squared
+vif(mod_final)
+AIC(mod_final)
+
+# Conlusión: Este modelo fue elegido de acuerdo al conocimiento del 
+# problema a resolver y en cosnecuecnia de acuerdo al criterio del 
+# investigador
+
+# -------------------------------------------------------------------------
+#         Evaluación del modelo por separado (bo,b1...,bk) 
+# -------------------------------------------------------------------------
+
+# 1. Prueba de hipotesis
+summary.lm(mod_final)
+
+# 2. Intervalo de confianza para los parámetros
+confint(mod_final)
+
+# -------------------------------------------------------------------------
+#                Evaluación del modelo en su conjunto 
+# -------------------------------------------------------------------------
+anov <- anova(mod_final)
+sctotal <-sum(as.vector(anov$`Sum Sq`))
+scerror <- as.data.frame(anov$`Sum Sq`)[6,]
+scregr <- sctotal-scerror
+
+# 1. Evaluación del modelo en su conjunto
+
+summary.lm(mod_final) #p.value
+
+# 2. Variabilidad explicada por el modelo
+
+varexpl <- round((scregr/sctotal)*100,2)
+varexpl
+
+# 3. Vaiabilidad no explicada por el modelo
+
+varnoexpl <- round((scerror/sctotal)*100,2)
+varnoexpl
+
+# -------------------------------------------------------------------------
+#    Predicción de un nuevo dato con las variables seleccionadas
+# -------------------------------------------------------------------------
+
+newdata = data.frame(SA= 32.1854,P= 223.8269,LAT =59.08,
+                       LON=  -138.67, DPlog= 1.886491)
+predict(mod_final, newdata)
+
+# -------------------------------------------------------------------------
+#      Intervalo de confianza y de predicción
+# -------------------------------------------------------------------------
+
+predict(mod_final, newdata, interval="confidence") 
+
+predict(mod_final, newdata, interval="predict")
+
+
+# -----------------------------------------------------------------------
+#                    Diagnostico del modelo de regresion 
+# -----------------------------------------------------------------------
+
+# Particularmente son:
+
+# 1. Normalidad
+# Prueba Grafica
+ols_plot_resid_qq(mod_final)
+ols_plot_resid_hist(mod_final)
+
+# Prueba Analitica
+# Ho: Los residuos provienen de una dn normal
+# H1: Los residuos no provienen de una dn normal
+ols_test_normality(mod_final)
+
+# 2. Homocedasticidad de varianzas
+
+# Prueba grafica
+ols_plot_resid_fit(mod_final)
+ols_plot_resid_stud(mod_final)
+ols_plot_resid_stand(mod_final)
+ols_plot_resid_stud_fit(mod_final)
+
+# Prueba analitica
+# Ho: Los residuos son homocedasticos
+# H1: Los residuos  no son homocedasticos
+library(lmtest)
+bptest(mod_final)
+
+# 3. Independencia de los residuos
+#Ho: No existe correlación entre los residuos.
+#H1: Existe correlación entre los residuos.
+
+library(lmtest)
+dwtest(mod_final,alternative="two.sided") 
+
+# 4. Aditividad
+
+residualPlots(mod_final,plot=F)
+# Ho: El modelo es aditivo
+# H1: el modelo no es aditivo
+
+# 5. Linealidad: 
+# "Gráficos de Componentes más Residuales (Parciales)". Dan una visión 
+# más clara y precisa de cómo una variable afecta a otra en un modelo 
+# de regresión, controlando por el efecto de otras variables. Esto es 
+# crucial para comprender las relaciones entre las variables en 
+# presencia de múltiples factores que podrían influir en la relación 
+# que estás investigando.
+
+library(car)
+crPlots(mod_final)
+#  Si la linea azul no se ajusta a la curva dada por una regresión no 
+# paramétrica suave color rosa, el modelo no es lineal.
+
+# 6. Observaciones anomalas
+
+# a) Observacion con alto efecto palanca tienen una combinacion
+#    inusual de valores predictores. Es decir, son aberrantes 
+#    en el espacio predictor.
+# b) Punto aberrante (outliers): es una observacion que no es 
+#    predicha satisfactoriamente por el modelo de regresion 
+#    (con un valor positivo o negativo grande del residuo)
+# c) Observaciones influyentes: son aquellas con un impacto 
+#    desproporcionado en la determinacion de los parametros 
+#    del modelo. Se identifican usando la distancia de Cook, 
+#    Cooks-D. Son de preocupar los puntos con Cooks-D>1
+
+# a) Datos leverage
+# Prueba Grafica. 
+ols_plot_resid_lev(mod_final)
+
+# Prueba analitica
+k=5 # Variables explicativas
+n<-length(data.frame(data_oc)[,1]) # Numero de observaciones
+
+which(hatvalues(mod_final)>(2*(k+1)/n))
+
+# b) Datos outliers
+
+# Prueba  Grafica
+ols_plot_resid_lev(mod_final)
+# Prueba analitica
+
+# H0: la observación i -ésima NO es un outlier 
+# H1: la observación i -ésima SI es un outlier.
+outlierTest(mod_final, cutoff=0.05, n.max=10, order=TRUE)
+
+# c) Observaciones influyentes
+
+# Prueba Grafica
+ols_plot_cooksd_bar(mod_final)
+ols_plot_cooksd_chart(mod_final)
+
+# Prueba analitica
+which(cooks.distance(mod_final)>4/(n-k-1))
+
+# -------------------------------------------------------------------------
+#    Eliminación de datos atipicos y correr nuevamente la regresión
+# -------------------------------------------------------------------------
+
+# Eliminacion de observaciones influyentes:
+
+# correr regresion
+mod_final1<-mod_final<-lm(data_oc2$E100[-c(45,52,65,101,108,128)]~.,
+                             data=data_env3[-c(45,52,65,101,108,128),])
+mod_final1
+summary.lm(mod_final1)
+summary.lm(mod_final1)$r.squared
+AIC(mod_final1)
+anova(mod_final1)
+vif(mod_final1)
+
+# Repetir todo el proceso
+
+
+###########################################################################
+#              Métodos paso a paso (Stepwise Methods)
+#    Selección de modelos de manera estadística y no con criterios del 
+#                             investigador 
+###########################################################################
+
+# 1. Eliminación progresiva (Backwards Elimination ≡ BE)
+
+# Se comienza con el conjunto completo de k variables explicativas. 
+# En cada paso del algoritmo BE se elimina el regresor menos explicativo 
+# individualmente. 
+
+ols_step_backward_p(mod_vif)
+
+data_envBW <- data_check[, !names(data_check ) %in% c("IC","LAT", "SA")]
+head(data_envBW,3)
+
+mod_BW <- lm(data_oc2$E100 ~ ., data = data_envBW,
+              na.action = "na.fail")
+summary.lm(mod_BW)
+summary.lm(mod_BW)$r.squared
+AIC(mod_BW)
+anova(mod_BW)
+vif(mod_BW)
+
+# Nota: Este modelo eliminó las variables IC, LAT y SA. Sin embargo, 
+# es importante verificar si las variables que quedaron explican el
+# a la variable de respuesta.
+
+# 2. Introducción progresiva (Forwards Selection ≡ FS)
+# Se comienza con un subconjunto de 0 regresores. En cada iteración se añade 
+# la variable Xj con el mayor ratio F (Izenman 2008).
+
+ols_step_forward_p(mod_vif)
+
+data_envFW <- data_check[, !names(data_check ) %in% c("IC","LON")]
+tail(data_envFW,3)
+
+mod_FW <- lm(data_oc2$E100 ~ ., data = data_envFW,
+             na.action = "na.fail")
+summary.lm(mod_FW)
+summary.lm(mod_FW)$r.squared
+anova(mod_FW)
+AIC(mod_FW)
+vif(mod_FW)
+
+# Nota: Este modelo incluyo 7 variables, eliminó 2 variables IC y 
+# LON. Es necesario verificar si las varbles elejidas explican
+# la varaible de respuesta. No osbtante es imporatnte recordar que
+# un modelo debe ser parsimonioso.
+
+
+# 3. Regresión paso a paso (Stepwise Regression ≡ SR)
+# Se trata de un procedimiento híbrido entre introducción y eliminación 
+#  progresivas. Como en la introducción progresiva de predictores, se 
+# comienza con 0 variables. En cada paso, al incluir una nueva variable 
+# y estimar el nuevo modelo, se evalúa la pertinencia de eliminar 
+# cualquiera de los regresores ya presentes 
+
+ols_step_both_p(mod_vif)
+
+data_envBO <- data_check[, !names(data_check ) %in% c("SA")]
+tail(data_envBO,3)
+
+mod_BO <- lm(data_oc2$E100 ~ ., data = data_envBO,
+             na.action = "na.fail")
+summary.lm(mod_BO)
+summary.lm(mod_BO)$r.squared
+AIC(mod_BO)
+anova(mod_BO)
+vif(mod_BO)
+
+# Nota: Este modelo incluyo 7 variables, de las cuales 1 fue removida 
+# SA. Es importante verificar si las variables elejidas explican la 
+# variable de respuesta. No osbtante es imporatnte recordar que
+# un modelo debe ser parsimonioso.
+#
+

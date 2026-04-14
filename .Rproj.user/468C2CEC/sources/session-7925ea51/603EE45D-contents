@@ -1,0 +1,617 @@
+#' Modelo Autorregresivo (AR)
+#'
+#' Esta función ajusta un modelo de series de tiempo donde el valor actual ($Y_t$)
+#' se explica mediante una combinación lineal de sus propios valores pasados
+#' ($Y_{t-1}, Y_{t-2}, ...$). Es la herramienta estándar para analizar la
+#' "persistencia" o "memoria" de un fenómeno a través del tiempo.
+#'
+#' @details
+#' El flujo interno de la función se divide en cinco etapas diagnósticas:
+#' \enumerate{
+#'   \item **Estimación (MLE):** Utiliza Máxima Verosimilitud para encontrar los
+#'         coeficientes $\phi$ (Phi) que mejor describen la dependencia temporal.
+#'   \item **Análisis de Estabilidad:** Calcula las raíces inversas del polinomio
+#'         característico. Un modelo AR solo es válido si es "Estacionario", es decir,
+#'         si las raíces se encuentran dentro del círculo unitario.
+#'   \item **Inferencia de Parámetros:** Calcula errores estándar y p-valores para
+#'         determinar cuántos rezagos (lags) son realmente significativos.
+#'   \item **Auditoría de Residuos:** Evalúa si el error restante es "Ruido Blanco"
+#'         mediante la prueba de Ljung-Box (independencia) y Shapiro-Wilk (normalidad).
+#'   \item **Traducción Didáctica:** Genera un reporte que explica si el modelo
+#'         "explota" (inestable) o si ha capturado exitosamente la memoria de la serie.
+#' }
+#'
+#' @section Guía de las 9 Gráficas de Diagnóstico (`plot`):
+#' Al ejecutar \code{plot(modelo)}, se despliega una auditoría temporal completa:
+#' \describe{
+#'   \item{\strong{1. Inspección Visual}}{Muestra la serie bruta con su media histórica. Ayuda a detectar tendencias que el modelo AR no puede manejar por sí solo.}
+#'   \item{\strong{2. Ajuste Temporal}}{Superpone el modelo sobre la realidad. La sombra roja indica la incertidumbre (Intervalo de Confianza).}
+#'   \item{\strong{3. Residuos en el Tiempo}}{Un "electrocardiograma" del error. No debe presentar ondas, ciclos ni tendencias.}
+#'   \item{\strong{4. Círculo Unitario}}{Gráfica matemática crítica. Si los rombos rojos salen del círculo, el modelo es inestable y no sirve para pronosticar.}
+#'   \item{\strong{5. ACF de Residuos}}{Busca correlaciones remanentes. Las barras deben ser pequeñas para confirmar que el error es ruido aleatorio.}
+#'   \item{\strong{6. PACF de Residuos}}{Ayuda a confirmar si el orden \code{p} seleccionado fue suficiente para limpiar la dependencia directa.}
+#'   \item{\strong{7. Normalidad (Q-Q Plot)}}{Valida que los choques aleatorios sigan una distribución normal, requisito para que los intervalos de confianza sean exactos.}
+#'   \item{\strong{8. Precisión (Real vs Ajustado)}}{Muestra la correlación directa entre la predicción y el dato observado.}
+#'   \item{\strong{9. Estacionariedad Móvil}}{Analiza si la media y la varianza cambian a lo largo de la serie. Una línea verde horizontal confirma un modelo robusto.}
+#' }
+#'
+#' @param x Vector numérico o serie de tiempo (\code{ts}). No debe contener valores \code{NA}.
+#' @param p Orden del modelo (número de rezagos a considerar). Por defecto es 1.
+#' @param nivel_confianza Nivel de significancia para las bandas de error (default 0.95).
+#'
+#' @return Un objeto de clase \code{"ar_greenreg"} que contiene los coeficientes,
+#'         las pruebas de estabilidad, los diagnósticos de ruido blanco y
+#'         dataframes listos para visualización avanzada.
+#'
+#' @examples
+#' #data("datos_anomalia_temperatura")
+#' #modelo_AR <- modelo_ar(datos_anomalia_temperatura$anomalia_c, p = 2)
+#' #modelo_AR
+#' #plot(modelo_AR)
+#'
+#' @importFrom stats arima coef residuals fitted Box.test pnorm qnorm shapiro.test acf pacf filter sd
+#' @importFrom ggrepel geom_text_repel
+#' @import ggplot2
+#' @export
+modelo_ar <- function(x, p = 1, nivel_confianza = 0.95) {
+
+  # --- 1. Validación y Ajuste ---
+  if (!is.numeric(x)) stop("El argumento 'x' debe ser numérico o una serie de tiempo (ts).")
+
+  # Ajuste usando ARIMA con q=0, d=0 (es decir, un AR puro)
+  modelo_base <- stats::arima(x, order = c(p, 0, 0))
+
+  # --- 2. Coeficientes e Interpretación ---
+  coefs <- coef(modelo_base)
+  # Error estándar aproximado (matriz de varianza-covarianza)
+  se <- sqrt(diag(modelo_base$var.coef))
+  z_val <- coefs / se
+  p_val <- 2 * (1 - stats::pnorm(abs(z_val)))
+
+  tabla_coefs <- data.frame(
+    Estimacion = coefs,
+    Std.Error = se,
+    z.value = z_val,
+    P.valor = p_val
+  )
+
+  # --- 3. Análisis de Estabilidad (Raíces) ---
+  # El modelo AR es estable si las raíces inversas del polinomio están dentro del círculo unitario
+  # Extraemos solo los coeficientes AR (sin intercepto)
+  ar_coefs <- coefs[grepl("^ar", names(coefs))]
+
+  if (length(ar_coefs) > 0) {
+    poly_roots <- polyroot(c(1, -ar_coefs))
+    inverse_roots <- 1 / poly_roots
+    modulos <- Mod(inverse_roots)
+    es_estable <- all(modulos < 1)
+  } else {
+    inverse_roots <- NULL
+    es_estable <- TRUE # AR(0) es ruido blanco, siempre estable
+  }
+
+  # --- 4. Diagnósticos de Residuos ---
+  residuos <- stats::residuals(modelo_base)
+
+  # A) Test Ljung-Box (Independencia / Ruido Blanco)
+  lb_test <- stats::Box.test(residuos, type = "Ljung-Box", lag = p + 5)
+  es_ruido_blanco <- lb_test$p.value > 0.05
+
+  # B) Test Shapiro-Wilk (Normalidad)
+  if (length(residuos) >= 3 && length(residuos) <= 5000) {
+    shapiro_test <- stats::shapiro.test(residuos)
+    es_normal <- shapiro_test$p.value > 0.05
+  } else {
+    shapiro_test <- list(p.value = NA)
+    es_normal <- NA
+  }
+
+  # --- 5. Notas ---
+  nota_estabilidad <- if (es_estable) {
+    "✅ CONCLUSIÓN: El modelo es ESTABLE (Estacionario). Puede usarse para predecir."
+  } else {
+    "⚠️ CONCLUSIÓN: El modelo es INESTABLE (No Estacionario). No es confiable a largo plazo."
+  }
+
+  nota_lb <- if (es_ruido_blanco) {
+    "✅ CONCLUSIÓN: Ruido Blanco (OK). No queda información útil en los errores."
+  } else {
+    "⚠️ CONCLUSIÓN: Existe Autocorrelación. El modelo no capturó toda la dinámica (Faltan lags)."
+  }
+
+  nota_norm <- if (!is.na(es_normal) && es_normal) {
+    "✅ CONCLUSIÓN: Los errores son Normales (OK). Los intervalos de confianza son fiables."
+  } else {
+    "⚠️ CONCLUSIÓN: Los errores NO son normales. Precaución con los intervalos."
+  }
+
+  # Interpretación del primer lag
+  phi1 <- if(length(ar_coefs) > 0) ar_coefs[1] else 0
+  nota_phi <- paste0("Persistencia: El coeficiente AR1 es ", round(phi1, 2), ". ",
+                     "Esto indica qué tanto del valor de ayer (t-1) se transfiere a hoy.")
+
+  # --- 6. Preparar Datos para Gráficas ---
+  # Valores ajustados: Real - Residuo
+  ajustados <- x - residuos
+
+  # Cálculo de Intervalos de Confianza (Shadows)
+  sigma <- sqrt(modelo_base$sigma2)
+  z_score <- stats::qnorm(1 - (1 - nivel_confianza) / 2)
+  lower_ci <- ajustados - z_score * sigma
+  upper_ci <- ajustados + z_score * sigma
+
+  df_plot <- data.frame(
+    Tiempo = 1:length(x),
+    Observado = as.numeric(x),
+    Ajustado = as.numeric(ajustados),
+    Lower = as.numeric(lower_ci),
+    Upper = as.numeric(upper_ci),
+    Residuos = as.numeric(residuos)
+  )
+
+  # Datos para círculo unitario (si hay raíces)
+  df_raices <- NULL
+  if (!is.null(inverse_roots)) {
+    df_raices <- data.frame(
+      Real = Re(inverse_roots),
+      Imaginario = Im(inverse_roots)
+    )
+  }
+
+  resultado <- list(
+    x_original = x,
+    modelo = modelo_base,
+    orden_p = p,
+    coeficientes = tabla_coefs,
+    estabilidad = list(es_estable = es_estable, raices_inv = inverse_roots),
+    diagnosticos = list(LjungBox = lb_test, Shapiro = shapiro_test, AIC = modelo_base$aic),
+    notas = list(est = nota_estabilidad, lb = nota_lb, norm = nota_norm, phi = nota_phi),
+    data_plot = df_plot,
+    data_raices = df_raices
+  )
+
+  class(resultado) <- "ar_greenreg"
+  return(resultado)
+}
+
+
+#' Impresión para Modelos Autorregresivos (AR)
+#' @export
+print.ar_greenreg <- function(x, ...) {
+  cat("\n==========================================================\n")
+  cat("     MODELO AUTORREGRESIVO AR(", x$orden_p, ") \n")
+  cat("==========================================================\n\n")
+
+  # --- 1. MODELO Y ECUACIÓN ---
+  cat("--- 1. MODELO Y ECUACIÓN ---\n")
+  phi <- round(x$modelo$coef[grepl("^ar", names(x$modelo$coef))], 3)
+  c_int <- round(x$modelo$coef["intercept"], 3)
+
+  # Construcción visual de la ecuación de diferencias
+  eq <- paste0("Y(t) = ", c_int)
+  for(i in 1:length(phi)) {
+    eq <- paste0(eq, " + (", phi[i], " * Y(t-", i, "))")
+  }
+  eq <- paste0(eq, " + ε(t)")
+
+  cat("Ecuación de Diferencias Estimada:\n", eq, "\n")
+  cat("AIC (Criterio de Akaike):", round(x$diagnosticos$AIC, 2), "\n")
+  cat(" NOTA: El intercepto representa el valor medio de la serie si es estacionaria.\n\n")
+
+  # --- 2. COEFICIENTES ESTIMADOS ---
+  cat("--- 2. COEFICIENTES ESTIMADOS (Parámetros Phi) ---\n")
+  stats::printCoefmat(as.matrix(x$coeficientes), digits = 4, signif.stars = TRUE)
+  cat("\n", x$notas$phi, "\n")
+  cat(" GUÍA: Si |Phi| es cercano a 1, la serie tiene mucha memoria (persistencia).\n\n")
+
+  # --- 3. IDENTIFICACIÓN DEL MODELO (ORDEN p) ---
+  cat("--- 3. IDENTIFICACIÓN DEL MODELO (Orden p) ---\n")
+  cat("• Orden seleccionado: p =", x$orden_p, "\n")
+  cat("• Criterio ACF: Las autocorrelaciones decaen exponencialmente o de forma sinoidal.\n")
+  cat("• Criterio PACF: Los coeficientes de autocorrelación parcial se cortan después del lag", x$orden_p, ".\n")
+  cat(" NOTA: Si ves barras significativas en PACF después de p, podrías necesitar un orden mayor.\n\n")
+
+  # --- 4. VERIFICACIÓN DE SUPUESTOS ---
+  cat("--- 4. VERIFICACIÓN DE SUPUESTOS ---\n")
+
+  # A) Estacionariedad (Estabilidad)
+  cat("A) Estacionariedad (Raíces Unitarias):\n")
+  if (!is.null(x$estabilidad$raices_inv)) {
+    modulos <- Mod(x$estabilidad$raices_inv)
+    cat("   - Módulos de raíces inversas:", paste(round(modulos, 3), collapse = ", "), "\n")
+  }
+  cat("   -", x$notas$est, "\n")
+
+  # B) Errores ~ Ruido Blanco
+  cat("\nB) Diagnóstico de Errores (ε ~ RB):\n")
+  # Media Cero
+  mean_res <- mean(x$data_plot$Residuos, na.rm = TRUE)
+  cat(sprintf("   • Media de los residuos: %.4f (Esperado: 0)\n", mean_res))
+
+  # No Autocorrelación (Ljung-Box)
+  cat(sprintf("   • No Autocorrelación (Ljung-Box p-valor): %.4f\n", x$diagnosticos$LjungBox$p.value))
+  cat("     ->", x$notas$lb, "\n")
+
+  # Varianza Constante y Normalidad
+  sh_pval <- x$diagnosticos$Shapiro$p.value
+  cat(sprintf("   • Normalidad (Shapiro p-valor): %s\n",
+              if(is.na(sh_pval)) "N/D" else round(sh_pval, 4)))
+  cat("     ->", x$notas$norm, "\n\n")
+
+  # --- 5. RESUMEN DEL MODELO ---
+  cat("--- 5. RESUMEN DEL MODELO ---\n")
+  if(x$estabilidad$es_estable && x$diagnosticos$LjungBox$p.value > 0.05) {
+    cat("✅ RESULTADO FINAL: El modelo AR(", x$orden_p, ") es VÁLIDO.\n", sep="")
+    cat("   Los residuos son ruido blanco y la serie es estacionaria.\n")
+  } else {
+    cat("⚠️ ADVERTENCIA: El modelo presenta deficiencias técnicas.\n")
+    cat("   Revisa si es necesario diferenciar la serie (d=1) o cambiar el orden p.\n")
+  }
+
+  cat("\n Usa plot(modelo) para visualizar la serie, ACF y raíces unitarias.\n")
+  cat("==========================================================\n")
+}
+
+
+
+#' Gráficas para Modelo AR
+#' @export
+plot.ar_greenreg <- function(x, ...) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) stop("Instala ggplot2.")
+
+  df <- x$data_plot
+
+  mi_tema <- ggplot2::theme_minimal() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = 14, color = "#2C3E50"),
+      plot.subtitle = ggplot2::element_text(size = 11, color = "#7F8C8D"),
+      plot.caption = ggplot2::element_text(hjust = 0, size = 10, face = "italic", color = "#555555", margin = ggplot2::margin(t = 10))
+    )
+
+  cat("Generando gráficas de diagnóstico AR... (Presiona [Enter] para avanzar)\n")
+
+  # --- GRÁFICA 1: SERIE ORIGINAL (VALORES VS TIEMPO) ---
+
+  # Calculamos estadísticas básicas para las líneas de referencia
+  media_serie <- mean(df$Observado, na.rm = TRUE)
+  sd_serie <- sd(df$Observado, na.rm = TRUE)
+
+  g1 <- ggplot2::ggplot(df, ggplot2::aes(x = Tiempo, y = Observado)) +
+    # Área sombreada que representa la variabilidad típica (Media ± 1 SD)
+    ggplot2::annotate("rect", xmin = -Inf, xmax = Inf,
+                      ymin = media_serie - sd_serie, ymax = media_serie + sd_serie,
+                      fill = "#34495E", alpha = 0.1) +
+    # Línea de la serie original
+    ggplot2::geom_line(color = "#2C3E50", size = 0.7) +
+    # Puntos sutiles para marcar cada dato
+    ggplot2::geom_point(color = "#2C3E50", alpha = 0.3, size = 1) +
+    # Línea de la media histórica
+    ggplot2::geom_hline(yintercept = media_serie, linetype = "dashed",
+                        color = "#E74C3C", size = 0.8) +
+    ggplot2::labs(
+      title = "1. Comportamiento de la Serie Original",
+      subtitle = "Análisis de Trayectoria y Estacionariedad Visual",
+      x = "Tiempo (Periodos)",
+      y = "Valor Observado",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "🔴 LÍNEA ROJA: Es el valor promedio histórico de tu serie.\n",
+                       "✅ ESTACIONARIA: Si la serie cruza constantemente la línea roja y no tiene tendencia.\n",
+                       "⚠️ TENDENCIA: Si la serie se aleja de la línea roja de forma sostenida (requiere d=1).\n",
+                       " NOTA: El área gris representa la zona de fluctuación normal (±1 Desviación Estándar).")
+    ) +
+    mi_tema
+
+  print(g1)
+  readline(prompt = "Gráfica 1: Inspección visual de la serie bruta > ")
+
+
+  g2 <- ggplot2::ggplot(df, ggplot2::aes(x = Tiempo)) +
+    # Sombra del intervalo de confianza (Banda de error)
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = Lower, ymax = Upper),
+                         fill = "#E74C3C", alpha = 0.15) +
+    # Línea de la serie observada (Realidad)
+    ggplot2::geom_line(ggplot2::aes(y = Observado, color = "Observado"), size = 0.8) +
+    # Línea del modelo ajustado (Predicción dentro de muestra)
+    ggplot2::geom_line(ggplot2::aes(y = Ajustado, color = "Modelo AR"), size = 0.8) +
+    # Configuración de colores manual
+    ggplot2::scale_color_manual(values = c("Observado" = "#34495E", "Modelo AR" = "#E74C3C")) +
+    ggplot2::labs(
+      title = paste0("2. Ajuste del Modelo AR(", x$orden_p, ")"),
+      subtitle = "Serie Observada vs. Valores Ajustados en el Tiempo",
+      x = "Tiempo (Periodos)",
+      y = "Valor de la Serie",
+      color = "Leyenda:",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN: La línea roja (Modelo) debe seguir la trayectoria de la oscura (Realidad).\n",
+                       "️ SOMBRA ROJA: Representa el intervalo de confianza al 95%.\n",
+                       " NOTA: Si el modelo está muy 'liso' y los datos son muy volátiles, falta orden p.")
+    ) +
+    mi_tema
+
+  print(g2)
+  readline(prompt = "Gráfica 2: Comparación temporal del ajuste > ")
+
+
+  # --- GRÁFICA 3: RESIDUOS EN EL TIEMPO (ε vs t) ---
+
+  # Calculamos la desviación estándar de los residuos para las bandas de control
+  sd_res <- sd(df$Residuos, na.rm = TRUE)
+
+  g3 <- ggplot2::ggplot(df, ggplot2::aes(x = Tiempo, y = Residuos)) +
+    # Área de confianza de los residuos (±2 desviaciones estándar)
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = -2*sd_res, ymax = 2*sd_res),
+                         fill = "#3498DB", alpha = 0.1) +
+    # Línea de los residuos
+    ggplot2::geom_line(color = "#2C3E50", size = 0.5) +
+    # Puntos para resaltar valores individuales
+    ggplot2::geom_point(color = "#3498DB", alpha = 0.4, size = 1) +
+    # Línea central de media cero
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.8) +
+    # Líneas de umbral crítico
+    ggplot2::geom_hline(yintercept = c(-2*sd_res, 2*sd_res),
+                        linetype = "dotted", color = "#E74C3C", alpha = 0.6) +
+    ggplot2::labs(
+      title = "3. Residuos en el Tiempo",
+      subtitle = "Buscando Aleatoriedad (ε ~ Ruido Blanco)",
+      x = "Tiempo (Periodos)",
+      y = "Error (Residuo)",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN: Los puntos oscilan al azar alrededor de cero (sin patrones).\n",
+                       "⚠️ BANDAS ROJAS: El 95% de los errores deberían estar dentro de estos límites.\n",
+                       "❌ MAL: Si ves una 'U', una tendencia o rachas largas arriba/abajo del cero.\n",
+                       " CLAVE: Si hay patrones, el modelo AR(", x$orden_p, ") es insuficiente.")
+    ) +
+    mi_tema
+
+  print(g3)
+  readline(prompt = "Gráfica 3: Análisis de aleatoriedad de los errores > ")
+
+  # --- GRÁFICA 4: ESTABILIDAD (CÍRCULO UNITARIO) ---
+
+  if (!is.null(x$data_raices)) {
+    # 1. Crear el círculo unitario (borde gris)
+    theta <- seq(0, 2*pi, length.out = 200)
+    df_circle <- data.frame(x = cos(theta), y = sin(theta))
+
+    # 2. Construcción de la Gráfica
+    g4 <- ggplot2::ggplot() +
+      # Dibujar el círculo de referencia
+      ggplot2::geom_path(data = df_circle, ggplot2::aes(x, y),
+                         color = "#7F8C8D", linetype = "dashed", size = 0.8) +
+      # Ejes cartesianos (Real e Imaginario)
+      ggplot2::geom_vline(xintercept = 0, color = "#BDC3C7") +
+      ggplot2::geom_hline(yintercept = 0, color = "#BDC3C7") +
+      # Sombrear el área interna (Zona de Estabilidad)
+      ggplot2::geom_polygon(data = df_circle, ggplot2::aes(x, y),
+                            fill = "#2ECC71", alpha = 0.05) +
+      # Graficar las raíces inversas
+      ggplot2::geom_point(data = x$data_raices,
+                          ggplot2::aes(x = Real, y = Imaginario),
+                          color = "#E74C3C", size = 4, shape = 18) +
+      # Asegurar que el gráfico sea perfectamente circular
+      ggplot2::coord_fixed(xlim = c(-1.2, 1.2), ylim = c(-1.2, 1.2)) +
+      ggplot2::labs(
+        title = "4. Estabilidad (Círculo Unitario)",
+        subtitle = paste0("Raíces Inversas del Polinomio AR(", x$orden_p, ")"),
+        x = "Parte Real",
+        y = "Parte Imaginaria",
+        caption = paste0("INTERPRETACIÓN:\n",
+                         "✅ ESTABLE: Todas las raíces (rombos rojos) están DENTRO del círculo.\n",
+                         "⚠️ ALERTA: Si una raíz toca el borde, la serie tiene una raíz unitaria (necesita d=1).\n",
+                         "❌ INESTABLE: Si una raíz sale del círculo, el modelo no converge y fallará al predecir.")
+      ) +
+      mi_tema
+
+    print(g4)
+
+  } else {
+    cat("ℹ️ El modelo AR(0) no tiene raíces; es ruido blanco puro y siempre es estable.\n")
+  }
+  readline(prompt = "Gráfica 4: Análisis de raíces > ")
+
+
+
+  # --- GRÁFICA 5: AUTOCORRELACIÓN DE RESIDUOS (ACF) ---
+
+  # 1. Cálculo de la ACF de los residuos
+  # lag.max suele ser 20 o 25 para ver suficiente historia
+  acf_res <- stats::acf(df$Residuos, plot = FALSE, lag.max = 20)
+
+  # Creamos el dataframe (quitamos el lag 0 porque siempre es 1)
+  df_acf <- data.frame(
+    Lag = as.numeric(acf_res$lag[-1]),
+    ACF = as.numeric(acf_res$acf[-1])
+  )
+
+  # Límite de significancia (Intervalo de confianza al 95%)
+  n_obs <- nrow(df)
+  limite <- 1.96 / sqrt(n_obs)
+
+  # Lógica de etiquetado: Solo mostrar el número del Lag si se sale de las bandas
+  df_acf$Etiqueta <- ifelse(abs(df_acf$ACF) > limite, as.character(df_acf$Lag), "")
+
+  # Ajuste de posición del texto (vjust) para que no choque con la barra
+  df_acf$vjust_pos <- ifelse(df_acf$ACF > 0, -0.5, 1.5)
+
+  # 2. Construcción de la Gráfica
+  g5 <- ggplot2::ggplot(df_acf, ggplot2::aes(x = Lag, y = ACF)) +
+    # Barras de la ACF
+    ggplot2::geom_col(fill = "#34495E", width = 0.4) +
+    # Líneas de significancia (Azules)
+    ggplot2::geom_hline(yintercept = c(limite, -limite),
+                        linetype = "dashed", color = "#2980B9", size = 0.8) +
+    # Línea base en cero
+    ggplot2::geom_hline(yintercept = 0, color = "black") +
+    # Etiquetas de error (Números Rojos)
+    ggplot2::geom_text(ggplot2::aes(label = Etiqueta, vjust = vjust_pos),
+                       color = "#E74C3C", fontface = "bold", size = 3.5) +
+    # Escala del eje X para que se vean bien los Lags
+    ggplot2::scale_x_continuous(breaks = 1:20) +
+    ggplot2::labs(
+      title = "5. Autocorrelación de Residuos (ACF)",
+      subtitle = "¿Quedó información sin capturar en los errores?",
+      x = "Lag (Retraso temporal)",
+      y = "Coeficiente de Autocorrelación",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN (RUIDO BLANCO): Todas las barras están dentro de las líneas azules.\n",
+                       "⚠️ NÚMEROS ROJOS: Indican retrasos donde el error sigue un patrón.\n",
+                       "❌ MAL: Si el Lag 1 es alto, el modelo necesita un orden 'p' mayor.\n",
+                       " NOTA: El Lag 0 se omite por ser la correlación del dato consigo mismo (1.0).")
+    ) +
+    mi_tema
+
+  print(g5)
+  readline(prompt = "Gráfica 5: Evaluación de la independencia de los errores > ")
+
+  # --- GRÁFICA 6: AUTOCORRELACIÓN PARCIAL (PACF) DE RESIDUOS ---
+
+  # 1. Cálculo de la PACF de los residuos
+  pacf_res <- stats::pacf(df$Residuos, plot = FALSE, lag.max = 20)
+
+  df_pacf <- data.frame(
+    Lag = as.numeric(pacf_res$lag),
+    PACF = as.numeric(pacf_res$acf)
+  )
+
+  # Límite de significancia (Mismo que en ACF)
+  n_obs <- nrow(df)
+  limite <- 1.96 / sqrt(n_obs)
+
+  # Lógica de etiquetado (Números rojos para fallas)
+  df_pacf$Etiqueta <- ifelse(abs(df_pacf$PACF) > limite, as.character(df_pacf$Lag), "")
+  df_pacf$vjust_pos <- ifelse(df_pacf$PACF > 0, -0.5, 1.5)
+
+  # 2. Construcción de la Gráfica
+  g6 <- ggplot2::ggplot(df_pacf, ggplot2::aes(x = Lag, y = PACF)) +
+    # Barras de la PACF (Color azul para diferenciar de ACF)
+    ggplot2::geom_col(fill = "#2980B9", width = 0.4) +
+    # Líneas de significancia
+    ggplot2::geom_hline(yintercept = c(limite, -limite),
+                        linetype = "dashed", color = "#E67E22", size = 0.8) +
+    # Línea base
+    ggplot2::geom_hline(yintercept = 0, color = "black") +
+    # Etiquetas de error
+    ggplot2::geom_text(ggplot2::aes(label = Etiqueta, vjust = vjust_pos),
+                       color = "#E74C3C", fontface = "bold", size = 3.5) +
+    # Escala del eje X
+    ggplot2::scale_x_continuous(breaks = 1:20) +
+    ggplot2::labs(
+      title = "6. Autocorrelación Parcial (PACF)",
+      subtitle = "Identificación de lags residuales directos",
+      x = "Lag (Retraso temporal)",
+      y = "Coeficiente PACF",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN: Ninguna barra sobresale de las líneas naranjas.\n",
+                       "⚠️ NÚMEROS ROJOS: Indican que ese lag específico aún tiene información útil.\n",
+                       " ACCIÓN: Si el Lag 1 o 2 es rojo, aumenta el orden 'p' en tu función modelo_ar().\n",
+                       " NOTA: La PACF ayuda a confirmar si el proceso es realmente un AR.")
+    ) +
+    mi_tema
+
+  print(g6)
+  readline(prompt = "Gráfica 6: Verificación de la estructura del orden p > ")
+
+  # --- GRÁFICA 7: NORMALIDAD DE RESIDUOS (Q-Q PLOT) ---
+  df_limpio <- df[!is.na(df$Ajustado) & !is.na(df$Observado), ]
+
+  g7 <- ggplot2::ggplot(df_limpio, ggplot2::aes(sample = Residuos)) +
+    # Puntos de los cuantiles observados vs teóricos
+    ggplot2::stat_qq(color = "#8E44AD", alpha = 0.6, size = 2) +
+    # Línea de referencia (lo que sería una normalidad perfecta)
+    ggplot2::stat_qq_line(color = "#E74C3C", linetype = "dashed", size = 1) +
+    ggplot2::labs(
+      title = "7. Normalidad (Q-Q Plot)",
+      subtitle = "Comparación de Cuantiles de Residuos vs. Normal Teórica",
+      x = "Cuantiles Teóricos (Normal)",
+      y = "Cuantiles Observados (Residuos)",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN: Los puntos morados deben seguir fielmente la línea roja diagonal.\n",
+                       "⚠️ COLAS: Si los extremos se alejan de la línea, hay valores atípicos (outliers).\n",
+                       " NOTA: Si los puntos forman una 'S', la distribución es asimétrica.\n",
+                       " CLAVE: La normalidad asegura que tus pronósticos sean estadísticamente confiables.")
+    ) +
+    mi_tema
+  print(g7)
+  readline(prompt = "Gráfica 7: Verificación de la distribución gaussiana > ")
+
+
+  # --- GRÁFICA 8: PRECISIÓN DEL MODELO (REAL VS AJUSTADO) ---
+
+  # Calculamos la correlación para el subtítulo
+  cor_val <- stats::cor(df$Observado, df$Ajustado, use = "complete.obs")
+
+  g8 <- ggplot2::ggplot(df, ggplot2::aes(x = Ajustado, y = Observado)) +
+    # Puntos de dispersión con transparencia para ver densidad
+    ggplot2::geom_point(color = "#2980B9", alpha = 0.5, size = 2) +
+    # Línea de Identidad (Puntos donde Real = Ajustado)
+    ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E74C3C", size = 1) +
+    # Línea de tendencia real de los datos (Regresión de los puntos)
+    ggplot2::geom_smooth(method = "lm", color = "#2C3E50", fill = "#BDC3C7", alpha = 0.2) +
+    ggplot2::labs(
+      title = "8. Precisión del Modelo (Predicho vs Real)",
+      subtitle = paste0("Correlación de Pearson: ", round(cor_val, 3)),
+      x = "Valor Ajustado (Modelo AR)",
+      y = "Valor Observado (Realidad)",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "🔴 LÍNEA ROJA: Diagonal de perfección (Realidad = Modelo).\n",
+                       "✅ BIEN: Los puntos deben estar cerca y paralelos a la línea roja.\n",
+                       "⚠️ DISPERSIÓN: Si los puntos se alejan mucho, el modelo tiene poca capacidad predictiva.\n",
+                       " NOTA: El modelo AR suele ser conservador y 'suavizar' los extremos.")
+    ) +
+    mi_tema
+
+  print(g8)
+  readline(prompt = "Gráfica 8: Comparación directa de valores reales y estimados > ")
+
+  # --- GRÁFICA 9: DIAGNÓSTICO DE ESTACIONARIEDAD (MÓVIL) ---
+
+  # 1. Calculamos ventana móvil (10% de la serie o mínimo 5 periodos)
+  ventana_ar <- max(5, round(nrow(df) * 0.1))
+
+  # 2. CÁLCULOS (Forzamos numérico para evitar conflictos de clase 'ts')
+  df_est_ar <- df
+  df_est_ar$Media_Movil <- as.numeric(stats::filter(df$Observado, rep(1/ventana_ar, ventana_ar), sides = 2))
+
+  # Cálculo de desviación estándar móvil (Varianza local)
+  df_est_ar$SD_Movil <- sapply(1:nrow(df), function(i) {
+    idx <- max(1, i-ventana_ar):min(nrow(df), i+ventana_ar)
+    sd(df$Observado[idx], na.rm = TRUE)
+  })
+
+  # 3. FILTRO CRÍTICO (Eliminamos las filas donde la media móvil es NA)
+  df_final_ar <- df_est_ar[!is.na(df_est_ar$Media_Movil), ]
+
+  # 4. CONSTRUCCIÓN DE LA GRÁFICA (Usando el DF filtrado)
+  g9 <- ggplot2::ggplot(df_final_ar, ggplot2::aes(x = Tiempo)) +
+    # Serie original de fondo (Completa, usando el df original)
+    ggplot2::geom_line(data = df, ggplot2::aes(y = Observado), color = "gray80", size = 0.5) +
+
+    # Franja de Varianza Móvil (Verde AR)
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = Media_Movil - SD_Movil,
+                                      ymax = Media_Movil + SD_Movil),
+                         fill = "#27AE60", alpha = 0.15) +
+
+    # Línea de la Media Móvil (Tendencia local)
+    ggplot2::geom_line(ggplot2::aes(y = Media_Movil), color = "#27AE60", size = 1.2) +
+
+    # Línea de la Media Global (Referencia fija en Rojo)
+    ggplot2::geom_hline(yintercept = mean(df$Observado, na.rm = TRUE),
+                        linetype = "dashed", color = "#C0392B", size = 0.8) +
+
+    ggplot2::labs(
+      title = "9. Diagnóstico de Estacionariedad",
+      subtitle = paste0("Análisis de Media y Varianza Móvil (Ventana k = ", ventana_ar, ")"),
+      x = "Tiempo (Periodos)",
+      y = "Valor de la Serie",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "🟢 LÍNEA VERDE: Media local móvil. Debe ser horizontal y estable.\n",
+                       "🔴 LÍNEA ROJA: Media global (Referencia constante).\n",
+                       "✅ BIEN: Si la franja verde es estable y no tiene tendencia.\n",
+                       " NOTA: Se han filtrado los extremos para un reporte libre de avisos de error.")
+    ) +
+    mi_tema
+
+  print(g9)
+  cat("Gráfica 9: Verificación de estabilidad de parámetros en el tiempo.\n")
+  cat("✅ Secuencia completa de 9 gráficas para Series de Tiempo (AR) finalizada.\n")
+}

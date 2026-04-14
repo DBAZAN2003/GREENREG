@@ -1,0 +1,4 @@
+"0","# 3. Ajustar el modelo de efectos mixtos"
+"0","# 'altura' en función de la interacción sustrato:medicion"
+"0","# '(1 | id_planta)' define que el intercepto varía según la plántula (medidas repetidas)"
+"0","modelo <- lmer(altura ~ sustrato * medicion + (1 | id_planta), data = mariel)"

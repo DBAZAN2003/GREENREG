@@ -1,0 +1,5 @@
+"0","#install.packages(""emmeans"")"
+"0","library(emmeans)"
+"0","# 5. Análisis Post-hoc (Comparaciones múltiples)"
+"0","# Si hay interacción significativa, queremos saber qué sustrato gana en qué medición"
+"0","comparaciones <- emmeans(modelo, pairwise ~ sustrato | medicion)"

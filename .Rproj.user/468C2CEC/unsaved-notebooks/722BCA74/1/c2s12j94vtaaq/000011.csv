@@ -1,0 +1,6 @@
+"0","# 1. Cargar las librerías necesarias"
+"0","# Instalar si es necesario: install.packages(c(""lme4"", ""lmerTest"", ""emmeans""))"
+"0","library(lme4)"
+"0","library(lmerTest)"
+"2","Error en library(lmerTest): no hay paquete llamado ‘lmerTest’
+"

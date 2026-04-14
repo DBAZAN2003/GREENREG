@@ -1,0 +1,2 @@
+"0","mariel <- read.csv(""C:/Users/dbaza/Documents/datos_experimento.csv"")"
+"0","head(mariel)"

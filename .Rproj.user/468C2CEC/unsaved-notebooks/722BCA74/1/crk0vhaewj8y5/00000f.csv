@@ -1,0 +1,8 @@
+"0","datos_limpios <- mariel %>%"
+"0","  mutate(### Convertimos columnas a tipos adecuados"
+"0","    id_planta = as.factor(id_planta),"
+"0","    sustrato = as.factor(sustrato),"
+"0","    fecha = dmy(fecha), ### Convierte formato día/mes/año automáticamente"
+"0","    altura = as.numeric(altura) ### Aseguramos que sea numérico"
+"0","  ) %>%"
+"0","  filter(!is.na(altura)) ### Removemos las mediciones que tienen NA"

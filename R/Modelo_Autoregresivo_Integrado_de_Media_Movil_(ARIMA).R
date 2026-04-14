@@ -1,0 +1,661 @@
+#' Modelo Integrado de Media Móvil Autorregresiva (ARIMA)
+#'
+#' Esta función ajusta el modelo más versátil para series de tiempo univariadas:
+#' el ARIMA(p, d, q). Combina la memoria de largo plazo (AR), la estabilización
+#' mediante diferenciación (I) para eliminar tendencias, y la respuesta a
+#' choques aleatorios de corto plazo (MA).
+#'
+#' @details
+#' El flujo interno de la función ejecuta una auditoría de cinco fases:
+#' \enumerate{
+#'   \item **Diferenciación (Fase I):** Si $d > 0$, el modelo resta los valores
+#'         consecutivos para eliminar la tendencia y lograr que la serie sea
+#'         "Estacionaria" (promedio constante).
+#'   \item **Estimación ARMA:** Sobre la serie ya estabilizada, estima los
+#'         parámetros $\phi$ (AR) y $\theta$ (MA) mediante Máxima Verosimilitud.
+#'   \item **Doble Validación de Estructura:** Analiza las raíces del polinomio
+#'         característico para asegurar que la parte AR sea **Estable** y la
+#'         parte MA sea **Invertible**.
+#'   \item **Auditoría de Residuos:** Verifica que el error final sea "Ruido Blanco"
+#'         mediante las pruebas de Ljung-Box (independencia) y Shapiro-Wilk (normalidad).
+#'   \item **Diagnóstico Dinámico:** Evalúa si la media y la varianza se mantienen
+#'         estables a lo largo del tiempo después de la integración.
+#' }
+#'
+#' @section Guía de las 10 Gráficas de Diagnóstico (`plot`):
+#' Al ejecutar \code{plot(modelo)}, se despliega el diagnóstico más completo del paquete:
+#' \describe{
+#'   \item{\strong{1. Serie Original}}{Visualiza la serie bruta. Fundamental para identificar la tendencia inicial que justifica el valor de $d$.}
+#'   \item{\strong{2. Ajuste Integrado}}{Superpone el modelo (púrpura) sobre la realidad, incluyendo bandas de confianza del 95\%.}
+#'   \item{\strong{3. Serie Diferenciada}}{Muestra la serie después de aplicar $d$. Si el modelo es correcto, esta serie debe verse plana y sin tendencia.}
+#'   \item{\strong{4. Círculo Unitario}}{Gráfica de convergencia matemática. Los puntos rojos (AR) y azules (MA) deben estar dentro del círculo gris.}
+#'   \item{\strong{5. Residuos en el Tiempo}}{Busca patrones de error. Los puntos deben formar una nube aleatoria sin ciclos visibles.}
+#'   \item{\strong{6. ACF de Residuos}}{Prueba de independencia. Las barras deben estar dentro de los límites para confirmar el Ruido Blanco.}
+#'   \item{\strong{7. PACF de Residuos}}{Ayuda a identificar si el orden autorregresivo $p$ es suficiente para explicar la inercia.}
+#'   \item{\strong{8. Normalidad (Q-Q Plot)}}{Valida que los errores sigan una distribución gaussiana para asegurar pronósticos confiables.}
+#'   \item{\strong{9. Precisión (Real vs Ajustado)}}{Evaluación de la correlación de Pearson entre los datos y la estimación.}
+#'   \item{\strong{10. Estacionariedad Final}}{Muestra la media y varianza móvil. Una franja púrpura estable certifica un modelo robusto.}
+#' }
+#'
+#' @param x Vector numérico o serie de tiempo (\code{ts}).
+#' @param p Orden Autorregresivo (memoria del pasado).
+#' @param d Orden de Integración (número de diferenciaciones).
+#' @param q Orden de Media Móvil (memoria de los errores).
+#' @param include_mean Lógico. ¿Incluir constante? (Suele ser \code{FALSE} si $d > 0$).
+#'
+#' @return Un objeto de clase \code{"arima_greenreg"} que contiene el modelo
+#'         \code{stats::arima}, tabla de coeficientes, estatus de estabilidad,
+#'         serie diferenciada y dataframes para visualización avanzada.
+#'
+#' @examples
+#' data("datos_nivel_presa")
+#' ts_data <- datos_nivel_presa$nivel_m
+#' modelo_ARIMA <- modelo_arima(ts_data, p = 1, d = 1, q = 1)
+#' modelo_ARIMA
+#' plot(modelo_ARIMA)
+#'
+#' @seealso \code{\link[stats]{arima}}
+#'
+#' @importFrom stats arima coef residuals fitted Box.test pnorm qnorm shapiro.test acf pacf filter sd
+#' @import ggplot2
+#' @export
+modelo_arima <- function(x, p = 1, d = 1, q = 1, include_mean = TRUE) {
+
+  # --- 1. Validación y Ajuste ---
+  if (!is.numeric(x)) stop("El argumento 'x' debe ser numérico.")
+
+  # Ajuste ARIMA(p, d, q)
+  modelo_base <- stats::arima(x, order = c(p, d, q), include.mean = include_mean)
+
+  # --- 2. Coeficientes y Estadísticas ---
+  coefs <- modelo_base$coef
+
+  # Si no hay coeficientes (ej: ARIMA(0,1,0)), manejamos el caso
+  if (length(coefs) > 0) {
+    se <- sqrt(diag(modelo_base$var.coef))
+    z_val <- coefs / se
+    p_val <- 2 * (1 - stats::pnorm(abs(z_val)))
+    tabla_coefs <- cbind(Estimate = coefs, `Std. Error` = se, `z value` = z_val, `Pr(>|z|)` = p_val)
+  } else {
+    tabla_coefs <- matrix(NA, nrow=0, ncol=4)
+  }
+
+  # --- 3. Análisis de Raíces (Estabilidad e Invertibilidad) ---
+
+  # A) Raíces AR (Estabilidad)
+  ar_coefs <- coefs[grepl("^ar", names(coefs))]
+  raices_ar_inv <- NULL
+  es_estable <- TRUE
+  if (length(ar_coefs) > 0) {
+    raices_ar_inv <- 1 / polyroot(c(1, -ar_coefs))
+    es_estable <- all(Mod(raices_ar_inv) < 1)
+  }
+
+  # B) Raíces MA (Invertibilidad)
+  ma_coefs <- coefs[grepl("^ma", names(coefs))]
+  raices_ma_inv <- NULL
+  es_invertible <- TRUE
+  if (length(ma_coefs) > 0) {
+    raices_ma_inv <- 1 / polyroot(c(1, ma_coefs))
+    es_invertible <- all(Mod(raices_ma_inv) < 1)
+  }
+
+  # --- 4. Diagnósticos de Residuos ---
+  residuos <- stats::residuals(modelo_base)
+
+  # Ljung-Box (Ruido Blanco)
+  lb_test <- stats::Box.test(residuos, type = "Ljung-Box", lag = p + q + 5)
+
+  # Shapiro-Wilk (Normalidad)
+  if (length(residuos) >= 3 && length(residuos) <= 5000) {
+    shapiro_test <- stats::shapiro.test(residuos)
+  } else {
+    shapiro_test <- list(p.value = NA)
+  }
+
+  # --- 5. Datos para Gráficas ---
+  ajustados <- x - residuos # En ARIMA esto devuelve la serie original ajustada
+  sigma <- sqrt(modelo_base$sigma2)
+  # Intervalos 95%
+  lower_ci <- ajustados - 1.96 * sigma
+  upper_ci <- ajustados + 1.96 * sigma
+
+  df_plot <- data.frame(
+    Tiempo = 1:length(x),
+    Observado = as.numeric(x),
+    Ajustado = as.numeric(ajustados),
+    Lower = as.numeric(lower_ci),
+    Upper = as.numeric(upper_ci),
+    Residuos = as.numeric(residuos)
+  )
+
+  # Datos de la serie diferenciada (para ver si d fue efectivo)
+  df_diff <- NULL
+  if (d > 0) {
+    serie_diff <- diff(x, differences = d)
+    df_diff <- data.frame(Tiempo = 1:length(serie_diff), Valor = as.numeric(serie_diff))
+  }
+
+  # Datos combinados para círculo unitario
+  df_raices <- data.frame(Real = numeric(), Imaginario = numeric(), Tipo = character())
+  if (!is.null(raices_ar_inv)) {
+    df_raices <- rbind(df_raices, data.frame(Real = Re(raices_ar_inv), Imaginario = Im(raices_ar_inv), Tipo = "AR (Estabilidad)"))
+  }
+  if (!is.null(raices_ma_inv)) {
+    df_raices <- rbind(df_raices, data.frame(Real = Re(raices_ma_inv), Imaginario = Im(raices_ma_inv), Tipo = "MA (Invertibilidad)"))
+  }
+
+  # --- 6. Objeto Final ---
+  resultado <- list(
+    modelo = modelo_base,
+    ordenes = c(p=p, d=d, q=q),
+    coeficientes_tabla = tabla_coefs,
+    estatus = list(estable = es_estable, invertible = es_invertible),
+    diagnosticos = list(lb = lb_test, shapiro = shapiro_test, aic = modelo_base$aic),
+    data_plot = df_plot,
+    data_diff = df_diff,
+    data_raices = df_raices
+  )
+
+  class(resultado) <- "arima_greenreg"
+  return(resultado)
+}
+
+#' Impresión Académica para Modelos Integrados ARIMA(p, d, q)
+#' @export
+print.arima_greenreg <- function(x, ...) {
+  p <- x$ordenes['p']
+  d <- x$ordenes['d']
+  q <- x$ordenes['q']
+
+  cat("\n==========================================================\n")
+  cat(sprintf("MODELO INTEGRADO ARIMA(%d, %d, %d) \n", p, d, q))
+  cat("==========================================================\n\n")
+
+  # --- 1. MODELO Y ECUACIÓN (CORREGIDO) ---
+  cat("--- 1. MODELO Y ECUACIÓN ---\n")
+
+  # Componentes para la descripción
+  parte_ar <- if(p > 0) paste0("AR(", p, ")") else ""
+  parte_i  <- if(d > 0) paste0("I(", d, ")") else ""
+  parte_ma <- if(q > 0) paste0("MA(", q, ")") else ""
+
+  # USAMOS Filter (con F mayúscula) para limpiar los espacios vacíos
+  estructura <- Filter(function(z) nchar(z) > 0, c(parte_ar, parte_i, parte_ma))
+
+  cat("Estructura:", paste(estructura, collapse = " + "), "\n")
+
+  if(d > 0) {
+    cat(sprintf("Ecuación: Δ^%d Y(t) = f(Pasado, Choques)\n", d))
+    cat(" NOTA: El modelo trabaja sobre la serie diferenciada para eliminar la tendencia.\n")
+  } else {
+    cat("Ecuación: Y(t) = f(Pasado, Choques)\n")
+  }
+  cat("AIC (Criterio de Akaike):", round(x$diagnosticos$aic, 2), "\n\n")
+
+  # --- 2. COEFICIENTES ESTIMADOS ---
+  cat("--- 2. COEFICIENTES ESTIMADOS ---\n")
+  if (nrow(x$coeficientes_tabla) > 0) {
+    stats::printCoefmat(x$coeficientes_tabla, digits = 4, signif.stars = TRUE)
+  } else {
+    cat("  (Modelo sin coeficientes estimados: Caminata aleatoria pura)\n")
+  }
+  cat("\n GUÍA: Los coeficientes explican la relación entre los datos ya diferenciados.\n\n")
+
+  # --- 3. IDENTIFICACIÓN DEL MODELO (p, d, q) ---
+  cat("--- 3. IDENTIFICACIÓN DEL MODELO ---\n")
+  cat(sprintf("• p (Auto-Regresivo): %d periodos de memoria propia.\n", p))
+  cat(sprintf("• d (Integración):    %d diferenciación(es) para lograr estacionariedad.\n", d))
+  cat(sprintf("• q (Media Móvil):    %d choques pasados que afectan el presente.\n", q))
+  cat(" NOTA: Un modelo ARIMA es exitoso si 'd' estabiliza la media y 'p,q' eliminan la autocorrelación.\n\n")
+
+  # --- 4. VERIFICACIÓN DE SUPUESTOS ---
+  cat("--- 4. VERIFICACIÓN DE SUPUESTOS ---\n")
+
+  # A) Estacionariedad y Estructura
+  cat("A) Estacionariedad y Estabilidad:\n")
+  if(d > 0) cat(sprintf("   • Estacionariedad: Lograda mediante %d diferenciación(es). ✅\n", d))
+
+  if(p > 0) {
+    status_ar <- if(x$estatus$estable) "✅ ESTABLE" else "❌ INESTABLE"
+    cat(sprintf("   • Parte AR: %s (Raíces Rojas dentro del círculo).\n", status_ar))
+  }
+
+  if(q > 0) {
+    status_ma <- if(x$estatus$invertible) "✅ INVERTIBLE" else "❌ NO INVERTIBLE"
+    cat(sprintf("   • Parte MA: %s (Rombos Azules dentro del círculo).\n", status_ma))
+  }
+
+  # B) Residuos ~ Ruido Blanco (ε)
+  cat("\nB) Diagnóstico de Residuos (ε ~ Ruido Blanco):\n")
+
+  # Media Cero
+  m_res <- mean(x$data_plot$Residuos, na.rm = TRUE)
+  cat(sprintf("   • Media de residuos: %.4f (Esperado: 0)\n", m_res))
+
+  # No Autocorrelación
+  lb_p <- x$diagnosticos$lb$p.value
+  cat(sprintf("   • Independencia (Ljung-Box p-valor): %.4f\n", lb_p))
+  if (lb_p > 0.05) {
+    cat("     -> ✅ OK: Los residuos son independientes (Ruido Blanco).\n")
+  } else {
+    cat("     -> ⚠️ ALERTA: El modelo no capturó toda la información disponible.\n")
+  }
+
+  # Normalidad y Varianza
+  sh_p <- x$diagnosticos$shapiro$p.value
+  cat(sprintf("   • Normalidad (Shapiro p-valor): %s\n", if(is.na(sh_p)) "N/D" else round(sh_p, 4)))
+
+  # --- 5. RESUMEN DEL MODELO ---
+  cat("\n--- 5. RESUMEN DEL MODELO ---\n")
+  if((p==0 || x$estatus$estable) && (q==0 || x$estatus$invertible) && lb_p > 0.05) {
+    cat("✅ MODELO VÁLIDO: El ARIMA ha sido correctamente identificado y ajustado.\n")
+  } else {
+    cat("⚠️ REVISIÓN NECESARIA: El modelo presenta problemas de estabilidad o residuos sucios.\n")
+  }
+
+  cat("\n Usa plot(modelo) para ver las 9 gráficas, incluyendo la Serie Diferenciada.\n")
+  cat("==========================================================\n")
+}
+
+
+
+#' @export
+plot.arima_greenreg <- function(x, ...) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) stop("Instala ggplot2.")
+
+  # --- 0. EXTRACCIÓN DE PARÁMETROS ---
+  df <- x$data_plot
+  p  <- x$ordenes['p']
+  d  <- x$ordenes['d']
+  q  <- x$ordenes['q']
+
+  # TEMA
+  mi_tema <- ggplot2::theme_minimal() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = 14, color = "#2C3E50"),
+      plot.subtitle = ggplot2::element_text(size = 11, color = "#7F8C8D"),
+      plot.caption = ggplot2::element_text(hjust = 0, size = 9, face = "italic",
+                                           color = "#555555", margin = ggplot2::margin(t = 15),
+                                           lineheight = 1.1),
+      plot.margin = ggplot2::margin(10, 10, 20, 10),
+      axis.title = ggplot2::element_text(face = "bold"),
+      legend.position = "top"
+    )
+
+  cat("Iniciando diagnóstico ARIMA... (10 gráficas totales)\n")
+
+  # --- GRÁFICA 1: SERIE ORIGINAL (VALORES VS TIEMPO) ---
+
+  media_orig <- mean(df$Observado, na.rm = TRUE)
+
+  g1 <- ggplot2::ggplot(df, ggplot2::aes(x = Tiempo, y = Observado)) +
+    # Línea de la serie original
+    ggplot2::geom_line(color = "#34495E", size = 0.7) +
+    # Puntos sutiles
+    ggplot2::geom_point(color = "#34495E", alpha = 0.3, size = 1) +
+    # Línea de la media (Referencia)
+    ggplot2::geom_hline(yintercept = media_orig, linetype = "dashed",
+                        color = "#8E44AD", size = 0.8) +
+    ggplot2::labs(
+      title = "1. Comportamiento de la Serie Original",
+      subtitle = "Visualización de la serie temporal bruta (sin diferenciar)",
+      x = "Tiempo (Periodos)",
+      y = "Valor Observado",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "🟣 LÍNEA PÚRPURA: Promedio histórico general.\n",
+                       "⚠️ ANALISIS: Si la serie sube o baja constantemente (tendencia),\n",
+                       "   el valor de d debe ser mayor a 0 para estabilizarla.\n",
+                       " NOTA: El ARIMA usará d=", d, " para corregir lo que vemos aquí.")
+    ) +
+    mi_tema
+
+  print(g1)
+  readline(prompt = "Gráfica 1: Inspección de la serie original. > ")
+
+  # --- GRÁFICA 2: AJUSTE DEL MODELO ARIMA (Real vs Ajustado) ---
+
+  g2 <- ggplot2::ggplot(df, ggplot2::aes(x = Tiempo)) +
+    # Sombra de Confianza (IC 95%) en Púrpura
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = Lower, ymax = Upper),
+                         fill = "#8E44AD", alpha = 0.15) +
+    # Serie Observada (Realidad)
+    ggplot2::geom_line(ggplot2::aes(y = Observado, color = "Observado"), size = 0.7) +
+    # Serie Ajustada (Modelo ARIMA)
+    ggplot2::geom_line(ggplot2::aes(y = Ajustado, color = "Modelo ARIMA"), size = 0.8) +
+    # Escala de colores
+    ggplot2::scale_color_manual(values = c("Observado" = "#34495E", "Modelo ARIMA" = "#8E44AD")) +
+    ggplot2::labs(
+      title = paste0("2. Ajuste del Modelo ARIMA(", p, ",", d, ",", q, ")"),
+      subtitle = "Serie Observada vs. Valores Ajustados (Fitted)",
+      x = "Tiempo (Periodos)",
+      y = "Valor",
+      color = "Referencia:",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN: La línea púrpura debe seguir la trayectoria de la oscura.\n",
+                       "🟣 SOMBRA: Rango donde el modelo espera que caigan los datos reales.\n",
+                       " NOTA: El ARIMA integra la diferenciación (d) para seguir tendencias\n",
+                       "   y los componentes (p,q) para ajustar las oscilaciones.")
+    ) +
+    mi_tema
+
+  print(g2)
+  readline(prompt = "Gráfica 2: Evaluación del ajuste integrado. > ")
+
+  # --- GRÁFICA 3: SERIE DIFERENCIADA (ESTACIONARIEDAD LOGRADA) ---
+
+  if (!is.null(x$data_diff)) {
+    # Usamos el dataframe de la serie diferenciada calculado en la función principal
+    df_diff <- x$data_diff
+    media_diff <- mean(df_diff$Valor, na.rm = TRUE)
+
+    g3 <- ggplot2::ggplot(df_diff, ggplot2::aes(x = Tiempo, y = Valor)) +
+      # Línea de la serie transformada (Diferenciada)
+      ggplot2::geom_line(color = "#8E44AD", size = 0.6) +
+      # Línea de referencia en Cero
+      ggplot2::geom_hline(yintercept = 0, linetype = "solid", color = "black", alpha = 0.5) +
+      # Línea de la media de la diferencia
+      ggplot2::geom_hline(yintercept = media_diff, linetype = "dashed",
+                          color = "#E74C3C", size = 0.8) +
+      ggplot2::labs(
+        title = paste0("3. Serie Diferenciada (d = ", d, ")"),
+        subtitle = "Transformación para lograr Estacionariedad",
+        x = "Tiempo (Periodos tras diferencia)",
+        y = paste0("Δ^", d, " Valor"),
+        caption = paste0("INTERPRETACIÓN:\n",
+                         "✅ BIEN: La serie debe oscilar aleatoriamente alrededor de la línea roja.\n",
+                         "🔴 LÍNEA ROJA: Media de los cambios. Si es cercana a cero, no hay deriva.\n",
+                         " NOTA: Esta es la serie que los componentes AR(", p, ") y MA(", q, ")\n",
+                         "   están intentando modelar realmente.")
+      ) +
+      mi_tema
+
+    print(g3)
+
+  } else {
+    # Caso donde d = 0 (Modelo es un ARMA simple)
+    cat("ℹ️ d = 0: No hay serie diferenciada para mostrar. La serie original ya es estacionaria.\n")
+  }
+  readline(prompt = "Gráfica 3: Verificación del efecto de la diferenciación. > ")
+
+
+
+  # --- GRÁFICA 4: ESTRUCTURA MATEMÁTICA (CÍRCULO UNITARIO) ---
+
+  if (nrow(x$data_raices) > 0) {
+    # 1. Definición del círculo de referencia
+    theta_circ <- seq(0, 2*pi, length.out = 200)
+    df_circle_arima <- data.frame(x = cos(theta_circ), y = sin(theta_circ))
+
+    # 2. Construcción del gráfico dual de raíces
+    g4 <- ggplot2::ggplot() +
+      # Círculo unitario (Límite de estabilidad e invertibilidad)
+      ggplot2::geom_path(data = df_circle_arima, ggplot2::aes(x, y),
+                         color = "#7F8C8D", linetype = "dashed", size = 0.8) +
+      # Área sombreada interna (Zona de validez)
+      ggplot2::geom_polygon(data = df_circle_arima, ggplot2::aes(x, y),
+                            fill = "#8E44AD", alpha = 0.05) +
+      # Ejes de coordenadas
+      ggplot2::geom_vline(xintercept = 0, color = "gray85") +
+      ggplot2::geom_hline(yintercept = 0, color = "gray85") +
+      # Raíces AR (Rojas) y MA (Azules)
+      ggplot2::geom_point(data = x$data_raices,
+                          ggplot2::aes(x = Real, y = Imaginario, color = Tipo, shape = Tipo),
+                          size = 4, stroke = 1.5) +
+      # Colores y formas diferenciadas
+      ggplot2::scale_color_manual(values = c("AR (Estabilidad)" = "#E74C3C",
+                                             "MA (Invertibilidad)" = "#2980B9")) +
+      ggplot2::scale_shape_manual(values = c("AR (Estabilidad)" = 16,
+                                             "MA (Invertibilidad)" = 18)) +
+      # Proporción fija para que el círculo no parezca un óvalo
+      ggplot2::coord_fixed(xlim = c(-1.1, 1.1), ylim = c(-1.1, 1.1)) +
+      ggplot2::labs(
+        title = "4. Estructura Matemática (Círculo Unitario)",
+        subtitle = paste0("Raíces del Polinomio ARIMA(", p, ",", d, ",", q, ")"),
+        x = "Parte Real",
+        y = "Parte Imaginaria",
+        color = "Componente:", shape = "Componente:",
+        caption = paste0("INTERPRETACIÓN:\n",
+                         "🔴 PUNTOS ROJOS (AR): Estabilidad del sistema dinámico.\n",
+                         "🔵 ROMBOS AZULES (MA): Invertibilidad (unicidad del modelo).\n",
+                         "⚠️ CRÍTICO: Si una raíz toca el borde gris, el modelo es casi\n",
+                         "   no-estacionario (posiblemente d requiere ser mayor).")
+      ) +
+      mi_tema + ggplot2::theme(legend.position = "right")
+
+    print(g4)
+
+  } else {
+    cat("ℹ️ ARIMA(", p, ",", d, ",", q, ") sin componentes AR/MA para graficar raíces.\n")
+  }
+  readline(prompt = "Gráfica 4: Análisis de la convergencia del modelo. > ")
+
+  # --- GRÁFICA 5: RESIDUOS EN EL TIEMPO (ε vs t) ---
+
+  # Calculamos la desviación estándar de los residuos para las bandas de control
+  sd_res_arima <- sd(df$Residuos, na.rm = TRUE)
+
+  g5 <- ggplot2::ggplot(df, ggplot2::aes(x = Tiempo, y = Residuos)) +
+    # Banda de confianza (±2 SD) en Púrpura tenue
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = -2*sd_res_arima, ymax = 2*sd_res_arima),
+                         fill = "#8E44AD", alpha = 0.1) +
+    # Línea de los residuos (errores)
+    ggplot2::geom_line(color = "#2C3E50", size = 0.5) +
+    # Puntos para detectar shocks o outliers
+    ggplot2::geom_point(color = "#8E44AD", alpha = 0.4, size = 1) +
+    # Línea central de referencia (Media Cero)
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.8) +
+    # Líneas críticas de control (±2 SD)
+    ggplot2::geom_hline(yintercept = c(-2*sd_res_arima, 2*sd_res_arima),
+                        linetype = "dotted", color = "#E74C3C", alpha = 0.7) +
+    ggplot2::labs(
+      title = "5. Residuos en el Tiempo (ε vs t)",
+      subtitle = paste0("Análisis de Independencia para ARIMA(", p, ",", d, ",", q, ")"),
+      x = "Tiempo (Periodos)",
+      y = "Error Residual",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN: Los puntos deben ser una nube aleatoria sin patrón aparente.\n",
+                       "⚠️ ROJO: Puntos fuera de las líneas punteadas son 'shocks' imprevistos.\n",
+                       " NOTA: Si ves que la nube se ensancha o se estrecha (Varianza no constante),\n",
+                       "   el supuesto de Homocedasticidad se está violando.")
+    ) +
+    mi_tema
+
+  print(g5)
+  readline(prompt = "Gráfica 5: Inspección visual de los errores del modelo. > ")
+
+  # --- GRÁFICA 6: AUTOCORRELACIÓN DE RESIDUOS (ACF) ---
+
+  # 1. Cálculo de la ACF (Lags 1 a 20)
+  acf_res_arima <- stats::acf(df$Residuos, plot = FALSE, lag.max = 20)
+  df_acf_arima <- data.frame(
+    Lag = as.numeric(acf_res_arima$lag[-1]),
+    ACF = as.numeric(acf_res_arima$acf[-1])
+  )
+
+  # Límite de significancia estadística (95%)
+  limite_arima <- 1.96 / sqrt(nrow(df))
+
+  # Lógica de detección: Resaltar fallos en Rojo
+  df_acf_arima$Etiqueta <- ifelse(abs(df_acf_arima$ACF) > limite_arima, as.character(df_acf_arima$Lag), "")
+  df_acf_arima$vjust_pos <- ifelse(df_acf_arima$ACF > 0, -0.5, 1.5)
+
+  # 2. Construcción de la Gráfica (Identidad Púrpura ARIMA)
+  g6 <- ggplot2::ggplot(df_acf_arima, ggplot2::aes(x = Lag, y = ACF)) +
+    # Barras de correlación (Gris oscuro para sobriedad técnica)
+    ggplot2::geom_col(fill = "#34495E", width = 0.5) +
+    # Líneas de significancia (Púrpura ARIMA)
+    ggplot2::geom_hline(yintercept = c(limite_arima, -limite_arima),
+                        linetype = "dashed", color = "#8E44AD", size = 0.8) +
+    # Línea base
+    ggplot2::geom_hline(yintercept = 0, color = "black") +
+    # Alertas visuales (Números de Lag que fallan)
+    ggplot2::geom_text(ggplot2::aes(label = Etiqueta, vjust = vjust_pos),
+                       color = "#E74C3C", fontface = "bold", size = 3.5) +
+    ggplot2::scale_x_continuous(breaks = 1:20) +
+    ggplot2::labs(
+      title = "6. Autocorrelación de Residuos (ACF)",
+      subtitle = "¿Se ha extraído toda la dependencia temporal?",
+      x = "Lag (Retraso)",
+      y = "Coeficiente ACF",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN: Si todas las barras están dentro de las líneas púrpuras.\n",
+                       "⚠️ ROJO: El lag indicado aún tiene información no capturada por el modelo.\n",
+                       " NOTA: El ARIMA(", p, ",", d, ",", q, ") busca que el error presente\n",
+                       "   sea totalmente independiente de los errores pasados.")
+    ) +
+    mi_tema
+
+  print(g6)
+  readline(prompt = "Gráfica 6: Validación de independencia estadística. > ")
+
+  # --- GRÁFICA 7: AUTOCORRELACIÓN PARCIAL DE RESIDUOS (PACF) ---
+
+  # 1. Cálculo de la PACF (Lags 1 a 20)
+  pacf_res_arima <- stats::pacf(df$Residuos, plot = FALSE, lag.max = 20)
+  df_pacf_arima <- data.frame(
+    Lag = as.numeric(pacf_res_arima$lag),
+    PACF = as.numeric(pacf_res_arima$acf)
+  )
+
+  # Límite de significancia (95%)
+  limite_arima <- 1.96 / sqrt(nrow(df))
+
+  # Lógica de detección: Alertas en Rojo
+  df_pacf_arima$Etiqueta <- ifelse(abs(df_pacf_arima$PACF) > limite_arima, as.character(df_pacf_arima$Lag), "")
+  df_pacf_arima$vjust_pos <- ifelse(df_pacf_arima$PACF > 0, -0.5, 1.5)
+
+  # 2. Construcción de la Gráfica
+  g7 <- ggplot2::ggplot(df_pacf_arima, ggplot2::aes(x = Lag, y = PACF)) +
+    # Barras de la PACF (Color Púrpura ARIMA)
+    ggplot2::geom_col(fill = "#8E44AD", width = 0.5) +
+    # Líneas de significancia (Naranja para precaución técnica)
+    ggplot2::geom_hline(yintercept = c(limite_arima, -limite_arima),
+                        linetype = "dashed", color = "#E67E22", size = 0.8) +
+    # Línea base
+    ggplot2::geom_hline(yintercept = 0, color = "black") +
+    # Alertas visuales
+    ggplot2::geom_text(ggplot2::aes(label = Etiqueta, vjust = vjust_pos),
+                       color = "#E74C3C", fontface = "bold", size = 3.5) +
+    ggplot2::scale_x_continuous(breaks = 1:20) +
+    ggplot2::labs(
+      title = "7. Autocorrelación Parcial de Residuos (PACF)",
+      subtitle = "Identificación de dependencias directas residuales",
+      x = "Lag (Retraso)",
+      y = "Coeficiente PACF",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN: Todas las barras dentro de las líneas naranjas.\n",
+                       "⚠️ NÚMEROS ROJOS: Indican que el componente AR(", p, ") no fue suficiente.\n",
+                       " NOTA: El PACF limpia el efecto de los lags intermedios para ver la\n",
+                       "   conexión pura entre el presente y el pasado del error.")
+    ) +
+    mi_tema
+
+  print(g7)
+  readline(prompt = "Gráfica 7: Diagnóstico final de la estructura del error. > ")
+
+  # --- GRÁFICA 8: NORMALIDAD DE RESIDUOS (Q-Q PLOT) ---
+
+  g8 <- ggplot2::ggplot(df, ggplot2::aes(sample = Residuos)) +
+    # Puntos de cuantiles observados (Púrpura ARIMA)
+    ggplot2::stat_qq(color = "#8E44AD", alpha = 0.6, size = 2) +
+    # Línea de referencia teórica (Distribución Normal)
+    ggplot2::stat_qq_line(color = "#2C3E50", linetype = "dashed", size = 1) +
+    ggplot2::labs(
+      title = "8. Normalidad de los Errores (Q-Q Plot)",
+      subtitle = "Distribución de Residuos vs. Cuantiles Teóricos Normales",
+      x = "Cuantiles Teóricos (Normal)",
+      y = "Cuantiles Observados (Residuos ARIMA)",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "✅ BIEN: Los puntos deben estar alineados sobre la diagonal punteada.\n",
+                       "⚠️ COLAS: Si los extremos se alejan, hay valores extremos no capturados.\n",
+                       " NOTA: La normalidad permite que las inferencias estadísticas sean exactas.\n",
+                       " CLAVE: Si hay mucha curvatura, el modelo ARIMA puede estar sesgado.")
+    ) +
+    mi_tema
+
+  print(g8)
+  readline(prompt = "Gráfica 8: Verificación de la distribución de los errores. > ")
+
+
+  # --- GRÁFICA 9: PRECISIÓN DEL MODELO (REAL VS AJUSTADO) ---
+
+  # Calculamos la correlación de Pearson para el reporte de precisión
+  cor_arima <- stats::cor(df$Observado, df$Ajustado, use = "complete.obs")
+
+  g9 <- ggplot2::ggplot(df, ggplot2::aes(x = Ajustado, y = Observado)) +
+    # Puntos de dispersión (Color Púrpura ARIMA)
+    ggplot2::geom_point(color = "#8E44AD", alpha = 0.5, size = 2) +
+    # Línea de Identidad (Ideal: Real = Predicho)
+    ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E74C3C", size = 1) +
+    # Línea de tendencia ajustada (Regresión de validación)
+    ggplot2::geom_smooth(method = "lm", formula = y ~ x, color = "#2C3E50", fill = "#BDC3C7", alpha = 0.2) +
+    ggplot2::labs(
+      title = "9. Precisión del Modelo (Predicho vs Real)",
+      subtitle = paste0("Correlación de Pearson: ", round(cor_arima, 3)),
+      x = "Valor Ajustado (Modelo ARIMA)",
+      y = "Valor Observado (Realidad)",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "🔴 LÍNEA ROJA: El escenario ideal de predicción perfecta.\n",
+                       "✅ BIEN: Los puntos púrpuras deben seguir la trayectoria de la línea roja.\n",
+                       "⚠️ DISPERSIÓN: Indica la incertidumbre del modelo ante choques aleatorios.\n",
+                       " NOTA: El ARIMA integra la tendencia para mejorar esta alineación.")
+    ) +
+    mi_tema
+
+  print(g9)
+  readline(prompt = "Gráfica 9: Evaluación de la capacidad de ajuste integrada. > ")
+
+  # --- GRÁFICA 10: DIAGNÓSTICO DE ESTACIONARIEDAD FINAL ---
+
+  # 1. Definir ventana (10% de los datos o mínimo 5)
+  ventana_arima <- max(5, round(nrow(df) * 0.1))
+
+  # 2. Cálculos sobre la Serie Original (para ver la estabilidad del ajuste)
+  df_est_arima <- df
+  df_est_arima$Media_Movil <- as.numeric(stats::filter(df$Observado, rep(1/ventana_arima, ventana_arima), sides = 2))
+
+  df_est_arima$SD_Movil <- sapply(1:nrow(df), function(i) {
+    idx <- max(1, i-ventana_arima):min(nrow(df), i+ventana_arima)
+    sd(df$Observado[idx], na.rm = TRUE)
+  })
+
+  # 3. FILTRO (Eliminamos NAs de los extremos para un reporte limpio)
+  df_final_arima <- df_est_arima[!is.na(df_est_arima$Media_Movil), ]
+
+  # 4. CONSTRUCCIÓN DE LA GRÁFICA (Estilo Púrpura ARIMA)
+  g10 <- ggplot2::ggplot(df_final_arima, ggplot2::aes(x = Tiempo)) +
+    # Serie original completa de fondo (Atenuada)
+    ggplot2::geom_line(data = df, ggplot2::aes(y = Observado), color = "gray85", size = 0.5) +
+
+    # Franja de Varianza Móvil (Púrpura ARIMA)
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = Media_Movil - SD_Movil,
+                                      ymax = Media_Movil + SD_Movil),
+                         fill = "#8E44AD", alpha = 0.15) +
+
+    # Línea de la Media Móvil (Nivel local)
+    ggplot2::geom_line(ggplot2::aes(y = Media_Movil), color = "#8E44AD", size = 1.2) +
+
+    # Línea de la Media Global (Referencia fija en Rojo)
+    ggplot2::geom_hline(yintercept = mean(df$Observado, na.rm = TRUE),
+                        linetype = "dashed", color = "#E74C3C", size = 0.8) +
+
+    ggplot2::labs(
+      title = "10. Diagnóstico de Estacionariedad Final",
+      subtitle = paste0("Análisis Dinámico de Media y Varianza (Ventana k = ", ventana_arima, ")"),
+      x = "Tiempo (Periodos)",
+      y = "Valor de la Serie",
+      caption = paste0("INTERPRETACIÓN:\n",
+                       "🟣 LÍNEA PÚRPURA: Media local. En un ARIMA con d=", d, ", debe seguir la tendencia.\n",
+                       "🔴 LÍNEA ROJA: Promedio global de la serie original.\n",
+                       "✅ BIEN: Si la franja púrpura tiene un ancho constante (Varianza estable).\n",
+                       " NOTA: Si el ancho de la franja crece, el modelo ARIMA requiere transformación Log.")
+    ) +
+    mi_tema
+
+  print(g10)
+
+  cat("\n✅ Diagnóstico ARIMA finalizado con éxito (10/10 gráficas).\n")
+}
+
+

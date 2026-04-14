@@ -1,0 +1,6 @@
+"0","# 2. Preparar variables"
+"0","# Es crucial que R trate el sustrato y la medición como factores (variables categóricas)"
+"0","# para comparar medias entre niveles."
+"0",""
+"0","mariel$sustrato <- as.factor(datos_limpios$sustrato)"
+"0","mariel$medicion <- as.factor(datos_limpios$medicion)"

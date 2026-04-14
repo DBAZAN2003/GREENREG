@@ -1,0 +1,119 @@
+---
+title: "MARIELITA"
+author: "DAYRON JARED BAZAN GUZMAN"
+date: "2026-02-28"
+output: html_document
+---
+
+### Cargar las paqueterias necesarias para el análisis y visualización de los datos
+```{r}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+```
+
+### Cargar los datos y visualizarlos 
+```{r}
+mariel <- read.csv("C:/Users/dbaza/Documents/datos_experimento.csv")
+head(mariel)
+```
+
+### Limpiar la base de datos (No dejarla con NA'S, datos faltantes o errores en los datos)
+```{r}
+datos_limpios <- mariel %>%
+  mutate(### Convertimos columnas a tipos adecuados
+    id_planta = as.factor(id_planta),
+    sustrato = as.factor(sustrato),
+    fecha = dmy(fecha), ### Convierte formato día/mes/año automáticamente
+    altura = as.numeric(altura) ### Aseguramos que sea numérico
+  ) %>%
+  filter(!is.na(altura)) ### Removemos las mediciones que tienen NA
+```
+
+### Preparación de los datos y visualización del crecimiento promedio de las plantulas por tipo de sustrato 
+```{r}
+# 3. Preparar los datos: calcular media y error estándar por sustrato y medición
+datos_resumen <- datos_limpios %>%
+  group_by(sustrato, medicion) %>%
+  summarise(
+    altura_promedio = mean(altura, na.rm = TRUE),
+    error_estandar = sd(altura, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# 4. Crear la gráfica de líneas con bandas de error
+ggplot(datos_resumen, aes(x = medicion, y = altura_promedio, color = sustrato, group = sustrato)) +
+  geom_line(size = 1.2) +                      # Líneas de tendencia
+  geom_point(size = 3) +                       # Puntos de medición
+  geom_errorbar(aes(ymin = altura_promedio - error_estandar, 
+                    ymax = altura_promedio + error_estandar), 
+                width = 0.2) +                 # Barras de error
+  labs(title = "Crecimiento promedio de plántulas por sustrato",
+       subtitle = "Comparativa de 3 sustratos a lo largo del tiempo",
+       x = "Número de medición",
+       y = "Altura promedio (cm)",
+       color = "Sustrato") +
+  theme_minimal() +                            # Estilo limpio
+  theme(plot.title = element_text(face = "bold"))
+```
+
+
+El objetivo es modelar la altura (y) en función del sustrato y el tiempo, reconociendo que las medidas de una misma planta están correlacionadas.
+
+La estructura del modelo que se sugiere es:
+$$y_{ij} = (\beta_0 + b_{0i}) + \beta_1 \cdot \text{sustrato} + \beta_2 \cdot \text{tiempo} + \beta_3 \cdot (\text{sustrato} \cdot \text{tiempo}) + \epsilon_{ij}$$
+Efectos Fijos: sustrato, medicion (tiempo) y su interacción (para ver si el crecimiento cambia distinto según el sustrato).
+
+Efectos Aleatorios: (1 | id_planta). Esto es lo que ajusta por la variabilidad individual (intercepto aleatorio), permitiendo que cada plántula tenga su propio "punto de partida".
+
+
+```{r}
+# 1. Cargar las librerías necesarias
+# Instalar si es necesario: install.packages(c("lme4", "lmerTest", "emmeans"))
+library(lme4)
+library(lmerTest)
+library(emmeans)
+```
+
+
+```{r}
+# 2. Preparar variables
+# Es crucial que R trate el sustrato y la medición como factores (variables categóricas)
+# para comparar medias entre niveles.
+
+mariel$sustrato <- as.factor(datos_limpios$sustrato)
+mariel$medicion <- as.factor(datos_limpios$medicion)
+```
+
+
+```{r}
+# 3. Ajustar el modelo de efectos mixtos
+# 'altura' en función de la interacción sustrato:medicion
+# '(1 | id_planta)' define que el intercepto varía según la plántula (medidas repetidas)
+modelo <- lmer(altura ~ sustrato * medicion + (1 | id_planta), data = mariel)
+```
+
+
+```{r}
+# 4. Ver tabla ANOVA
+# Esto nos dirá si el sustrato, el tiempo o su interacción son significativos
+print(anova(modelo))
+```
+
+
+```{r}
+#install.packages("emmeans")
+library(emmeans)
+# 5. Análisis Post-hoc (Comparaciones múltiples)
+# Si hay interacción significativa, queremos saber qué sustrato gana en qué medición
+comparaciones <- emmeans(modelo, pairwise ~ sustrato | medicion)
+```
+
+
+```{r}
+# Ver las comparaciones
+summary(comparaciones$contrasts)
+
+```
+
+
